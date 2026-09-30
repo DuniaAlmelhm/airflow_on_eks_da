@@ -11,67 +11,69 @@
 # - Environment variables AOK_AWS_REGION, AOK_EKS_CLUSTER_NAME should be set.
 
 
-printf "Deploy Kubernetes Cluster Autoscaler.\n"
+# TODO: We use Karpenter for autoscaling. So no need for this
+#printf "Deploy Kubernetes Cluster Autoscaler.\n"
+#
+#printf "Associating OIDC provider with the EKS cluster...\n"
+#
+#eksctl utils associate-iam-oidc-provider \
+#   --region $AOK_AWS_REGION \
+#   --cluster $AOK_EKS_CLUSTER_NAME\
+#   --approve
+#
+#printf "Creating an IAM policy document for cluster autoscaler...\n"
+#cat << EOF > cluster-autoscaler-policy.json
+#{
+#    "Version": "2012-10-17",
+#    "Statement": [
+#        {
+#            "Action": [
+#                "autoscaling:DescribeAutoScalingGroups",
+#                "autoscaling:DescribeAutoScalingInstances",
+#                "autoscaling:DescribeLaunchConfigurations",
+#                "autoscaling:DescribeTags",
+#                "autoscaling:SetDesiredCapacity",
+#                "autoscaling:TerminateInstanceInAutoScalingGroup",
+#                "ec2:DescribeLaunchTemplateVersions"
+#            ],
+#            "Resource": "*",
+#            "Effect": "Allow"
+#        }
+#    ]
+#}
+#EOF
+#
+#printf "Creating the IAM policy...\n"
+#export AOK_AmazonEKSClusterAutoscalerPolicy=$(aws iam create-policy \
+#  --policy-name AmazonEKSClusterAutoscalerPolicy \
+#  --policy-document file://cluster-autoscaler-policy.json)
+#
+#printf "Creating service account for cluster autoscaler...\n"
+#eksctl create iamserviceaccount \
+#  --cluster=$AOK_EKS_CLUSTER_NAME \
+#  --namespace=kube-system \
+#  --name=cluster-autoscaler \
+#  --attach-policy-arn=arn:aws:iam::$AOK_ACCOUNT_ID:policy/AmazonEKSClusterAutoscalerPolicy \
+#  --override-existing-serviceaccounts \
+#  --region $AOK_AWS_REGION \
+#  --approve
+#
+#printf "Adding cluster autoscaler helm repo....\n"
+#helm repo add autoscaler https://kubernetes.github.io/autoscaler
+#helm repo update
+#
+#printf "Installing cluster autoscaler....\n"
+#helm install cluster-autoscaler \
+#  autoscaler/cluster-autoscaler \
+#  --namespace kube-system \
+#  --set 'autoDiscovery.clusterName'=$AOK_EKS_CLUSTER_NAME \
+#  --set awsRegion=$AOK_AWS_REGION \
+#  --set cloud-provider=aws \
+#  --set extraArgs.balance-similar-node-groups=true \
+#  --set extraArgs.skip-nodes-with-system-pods=true \
+#  --set rbac.serviceAccount.create=false \
+#  --set rbac.serviceAccount.name=cluster-autoscaler
 
-printf "Associating OIDC provider with the EKS cluster...\n"
-
-eksctl utils associate-iam-oidc-provider \
-   --region $AOK_AWS_REGION \
-   --cluster $AOK_EKS_CLUSTER_NAME\
-   --approve
-
-printf "Creating an IAM policy document for cluster autoscaler...\n"
-cat << EOF > cluster-autoscaler-policy.json
-{
-    "Version": "2012-10-17",
-    "Statement": [
-        {
-            "Action": [
-                "autoscaling:DescribeAutoScalingGroups",
-                "autoscaling:DescribeAutoScalingInstances",
-                "autoscaling:DescribeLaunchConfigurations",
-                "autoscaling:DescribeTags",
-                "autoscaling:SetDesiredCapacity",
-                "autoscaling:TerminateInstanceInAutoScalingGroup",
-                "ec2:DescribeLaunchTemplateVersions"
-            ],
-            "Resource": "*",
-            "Effect": "Allow"
-        }
-    ]
-}
-EOF
-
-printf "Creating the IAM policy...\n"
-export AOK_AmazonEKSClusterAutoscalerPolicy=$(aws iam create-policy \
-  --policy-name AmazonEKSClusterAutoscalerPolicy \
-  --policy-document file://cluster-autoscaler-policy.json)
-
-printf "Creating service account for cluster autoscaler...\n"
-eksctl create iamserviceaccount \
-  --cluster=$AOK_EKS_CLUSTER_NAME \
-  --namespace=kube-system \
-  --name=cluster-autoscaler \
-  --attach-policy-arn=arn:aws:iam::$AOK_ACCOUNT_ID:policy/AmazonEKSClusterAutoscalerPolicy \
-  --override-existing-serviceaccounts \
-  --region $AOK_AWS_REGION \
-  --approve
-
-printf "Adding cluster autoscaler helm repo....\n"
-helm repo add autoscaler https://kubernetes.github.io/autoscaler
-helm repo update
-
-printf "Installing cluster autoscaler....\n"
-helm install cluster-autoscaler \
-  autoscaler/cluster-autoscaler \
-  --namespace kube-system \
-  --set 'autoDiscovery.clusterName'=$AOK_EKS_CLUSTER_NAME \
-  --set awsRegion=$AOK_AWS_REGION \
-  --set cloud-provider=aws \
-  --set extraArgs.balance-similar-node-groups=true \
-  --set extraArgs.skip-nodes-with-system-pods=true \
-  --set rbac.serviceAccount.create=false \
-  --set rbac.serviceAccount.name=cluster-autoscaler
 
 
 
@@ -125,12 +127,11 @@ printf "Waiting for 10 seconds...\n"
 sleep 10
 
 printf "Creating EFS mount targets in each subnet attached to on-demand nodes...\n"
-for subnet in $(aws eks describe-nodegroup \
-  --cluster-name $AOK_EKS_CLUSTER_NAME \
-  --nodegroup-name ng-on-demand \
+for subnet in $(aws ec2 describe-subnets \
+  --filters "Name=vpc-id,Values=$AOK_VPC_ID" "Name=tag:kubernetes.io/role/internal-elb,Values=1" \
   --region $AOK_AWS_REGION \
   --output text \
-  --query "nodegroup.subnets"); \
+  --query "Subnets[].SubnetId"); \
 do (aws efs create-mount-target \
   --file-system-id $AOK_EFS_FS_ID \
   --subnet-id $subnet \
@@ -150,12 +151,11 @@ export AOK_EFS_AP=$(aws efs create-access-point \
 printf "Deploy an Amazon RDS PostgreSQL database.\n"
 
 printf "Obtaining the list of Private Subnets in Env variables...\n"
-export AOK_PRIVATE_SUBNETS=$(aws eks describe-nodegroup \
-  --cluster-name $AOK_EKS_CLUSTER_NAME \
-  --nodegroup-name ng-on-demand \
+export AOK_PRIVATE_SUBNETS=$(aws ec2 describe-subnets \
+  --filters "Name=vpc-id,Values=$AOK_VPC_ID" "Name=tag:kubernetes.io/role/internal-elb,Values=1" \
   --region $AOK_AWS_REGION \
   --output text \
-  --query "nodegroup.subnets" | awk -v OFS="," '{for(i=1;i<=NF;i++)if($i~/subnet/)$i="\"" $i "\"";$1=$1}1')
+  --query "Subnets[].SubnetId" | awk -v OFS="," '{for(i=1;i<=NF;i++)if($i~/subnet/)$i="\"" $i "\"";$1=$1}1')
 
 printf "Creating a DB Subnet group...\n"
 aws rds create-db-subnet-group \
@@ -165,9 +165,10 @@ aws rds create-db-subnet-group \
    --region $AOK_AWS_REGION
 
 printf "Creating the RDS Postgres Instance...\n"
+# db.m4.large is deprecated.
 aws rds create-db-instance \
   --db-instance-identifier airflow-postgres \
-  --db-instance-class db.m4.large \
+  --db-instance-class db.m5.large \
   --db-name airflow \
   --db-subnet-group-name airflow-postgres-subnet \
   --engine postgres \
@@ -233,8 +234,9 @@ case $_MY_OS in
   ;;
 esac
 
-export AOK_AIRFLOW_REPOSITORY=$(aws ecr create-repository \
-  --repository-name airflow-eks-demo \
-  --region $AOK_AWS_REGION \
-  --query 'repository.repositoryUri' \
-  --output text)
+# TODO: Not needed for now or it needs to be updated later on
+#export AOK_AIRFLOW_REPOSITORY=$(aws ecr create-repository \
+#  --repository-name airflow-eks-demo \
+#  --region $AOK_AWS_REGION \
+#  --query 'repository.repositoryUri' \
+#  --output text)
